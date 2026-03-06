@@ -3,7 +3,7 @@
 TV synth is a modular, node-based video synthesizer and feedback engine built with Three.js and Vite. It allows you to create complex visual patterns, process live camera feeds, and capture screen content through a dynamic shader generation system.
 
 ### 🖖 **Vibe Coded**
-This project was **vibe coded** with Antigravity and Claude code, embracing a fast, iterative, and experimental development flow.
+This project was **vibe coded** with Antigravity and Claude code... Yes I am ashamed. 
 
 ---
 

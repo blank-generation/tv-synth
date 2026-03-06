@@ -74,37 +74,171 @@ export class NodeEditor {
     private dragging: DragState | null = null;
     private connecting: ConnectState | null = null;
 
+    private pan = { x: 0, y: 0 };
+    private zoom = 1;
+    private isPanning = false;
+    private panStart = { x: 0, y: 0 };
+    private transformLayer: HTMLElement;
+    private contextConn: { fromId: string; toId: string; inputName: string } | null = null;
+    private helpOverlay!: HTMLElement;
+    private helpVisible = true;
+
     constructor(container: HTMLElement, graph: ModuleGraph, onChange: () => void) {
         this.container = container;
         this.graph = graph;
         this.onChange = onChange;
 
+        // Layer -1: Background for panning/contextmenu
+        const bg = document.createElement('div');
+        bg.className = 'node-editor-bg';
+        container.appendChild(bg);
+
+        // Layer 0: Transform wrapper
+        this.transformLayer = document.createElement('div');
+        this.transformLayer.className = 'node-transform-layer';
+        container.appendChild(this.transformLayer);
+
         // Layer 1: SVG for connection lines
         this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg') as SVGSVGElement;
         this.svg.classList.add('node-svg');
-        container.appendChild(this.svg);
+        this.transformLayer.appendChild(this.svg);
 
         // Layer 2: node cards
         this.nodeLayer = document.createElement('div');
         this.nodeLayer.className = 'node-layer';
-        container.appendChild(this.nodeLayer);
+        this.transformLayer.appendChild(this.nodeLayer);
 
         // Layer 3: module menu + trigger (above everything)
         this.createMenu();
 
         window.addEventListener('mousemove', this.onMouseMove);
         window.addEventListener('mouseup', this.onMouseUp);
+        this.container.addEventListener('wheel', this.onWheel, { passive: false });
+        bg.addEventListener('mousedown', this.onMouseDown);
 
         window.addEventListener('contextmenu', (e) => {
             const target = e.target as HTMLElement;
-            if (target.closest('.node-card') || target.closest('#preview') || target.closest('.module-menu') || target.closest('.menu-trigger')) return;
+            if (target.closest('.node-card') || target.closest('#preview') || target.closest('.module-menu') || target.closest('.menu-trigger') || target.closest('.port-dot')) return;
+
+            // Check if right-clicking a connection line
+            if (target.classList.contains('conn-line')) {
+                // We'll handle this later for node insertion
+                return;
+            }
+            this.contextConn = null;
             e.preventDefault();
             if (this.menuOpen) this.closeMenu();
             this.openMenuAt(e.clientX, e.clientY);
         });
 
         this.render();
+        this.applyTransform();
+        this.createHelpOverlay();
         requestAnimationFrame(() => this.drawConnections());
+    }
+
+    private applyTransform() {
+        this.transformLayer.style.transform = `translate(${this.pan.x}px, ${this.pan.y}px) scale(${this.zoom})`;
+    }
+
+    private screenToCanvas(x: number, y: number) {
+        const r = this.container.getBoundingClientRect();
+        return {
+            x: (x - r.left - this.pan.x) / this.zoom,
+            y: (y - r.top - this.pan.y) / this.zoom
+        };
+    }
+
+    private onWheel = (e: WheelEvent) => {
+        e.preventDefault();
+        const delta = -e.deltaY;
+        const factor = Math.pow(1.05, delta / 100);
+        const newZoom = Math.min(Math.max(this.zoom * factor, 0.1), 5);
+
+        const mouseCanvas = this.screenToCanvas(e.clientX, e.clientY);
+        this.zoom = newZoom;
+
+        const r = this.container.getBoundingClientRect();
+        this.pan.x = e.clientX - r.left - mouseCanvas.x * this.zoom;
+        this.pan.y = e.clientY - r.top - mouseCanvas.y * this.zoom;
+
+        this.applyTransform();
+        this.drawConnections();
+    };
+
+    private onMouseDown = (e: MouseEvent) => {
+        if (e.button === 1 || (e.button === 0 && e.altKey)) {
+            this.isPanning = true;
+            this.panStart = { x: e.clientX - this.pan.x, y: e.clientY - this.pan.y };
+            e.preventDefault();
+        }
+    };
+
+    private createHelpOverlay() {
+        this.helpOverlay = document.createElement('div');
+        this.helpOverlay.className = 'help-overlay';
+        if (this.helpVisible) this.helpOverlay.classList.add('open');
+
+        this.helpOverlay.innerHTML = `
+            <div class="help-header">CONTROLS</div>
+            <div class="help-grid">
+                <div class="help-item"><span class="key">Wheel</span> Zoom in/out</div>
+                <div class="help-item"><span class="key">Middle Click</span> Pan graph</div>
+                <div class="help-item"><span class="key">Alt+LClick</span> Pan graph</div>
+                <div class="help-item"><span class="key">RClick Wire</span> Insert node</div>
+                <div class="help-item"><span class="key">DblClick Wire</span> Disconnect</div>
+                <div class="help-item"><span class="key">RClick BG</span> Add module</div>
+            </div>
+            <button class="help-close">Got it</button>
+        `;
+
+        this.helpOverlay.querySelector('.help-close')?.addEventListener('click', () => this.toggleHelp());
+        document.body.appendChild(this.helpOverlay);
+    }
+
+    public toggleHelp() {
+        this.helpVisible = !this.helpVisible;
+        this.helpOverlay.classList.toggle('open', this.helpVisible);
+    }
+
+    public tidyNodes() {
+        const mods = Array.from(this.graph.modules.values());
+        const levels = new Map<string, number>();
+
+        // Simple topological sort for leveling
+        const getLevel = (id: string): number => {
+            if (levels.has(id)) return levels.get(id)!;
+            const inputs = this.graph.connections.filter(c => c.toId === id);
+            if (inputs.length === 0) {
+                levels.set(id, 0);
+                return 0;
+            }
+            const level = Math.max(...inputs.map(c => getLevel(c.fromId))) + 1;
+            levels.set(id, level);
+            return level;
+        };
+
+        mods.forEach(m => getLevel(m.id));
+
+        const layerMap: Record<number, string[]> = {};
+        mods.forEach(m => {
+            const l = levels.get(m.id) || 0;
+            if (!layerMap[l]) layerMap[l] = [];
+            layerMap[l].push(m.id);
+        });
+
+        Object.keys(layerMap).forEach(levelStr => {
+            const level = parseInt(levelStr);
+            const ids = layerMap[level];
+            ids.forEach((id, i) => {
+                const mod = this.graph.getModule(id)!;
+                mod.position.x = 50 + level * 250;
+                mod.position.y = 50 + i * 280;
+            });
+        });
+
+        this.render();
+        this.onChange();
     }
 
     private createMenu() {
@@ -496,31 +630,37 @@ export class NodeEditor {
     }
 
     private onMouseMove = (e: MouseEvent) => {
+        if (this.isPanning) {
+            this.pan.x = e.clientX - this.panStart.x;
+            this.pan.y = e.clientY - this.panStart.y;
+            this.applyTransform();
+            this.drawConnections();
+            return;
+        }
         if (this.dragging) {
             const mod = this.graph.modules.get(this.dragging.id)!;
             mod.position = {
-                x: this.dragging.startX + e.clientX - this.dragging.startMX,
-                y: this.dragging.startY + e.clientY - this.dragging.startMY,
+                x: this.dragging.startX + (e.clientX - this.dragging.startMX) / this.zoom,
+                y: this.dragging.startY + (e.clientY - this.dragging.startMY) / this.zoom,
             };
             const el = this.nodeLayer.querySelector(`.node-card[data-id="${this.dragging.id}"]`) as HTMLElement;
             if (el) { el.style.left = mod.position.x + 'px'; el.style.top = mod.position.y + 'px'; }
             this.drawConnections();
         }
         if (this.connecting) {
-            const cr = this.container.getBoundingClientRect();
-            let mx = e.clientX - cr.left;
-            let my = e.clientY - cr.top;
+            const canvasPos = this.screenToCanvas(e.clientX, e.clientY);
+            let mx = canvasPos.x;
+            let my = canvasPos.y;
 
             // Wire Snapping
             this.container.querySelectorAll('.port-dot').forEach(p => p.classList.remove('snap-target'));
             const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
             if (el?.classList.contains('port-dot')) {
                 const targetIsOutput = el.dataset.portType === 'output';
-                // Only snap to compatible ports
                 if (this.connecting!.isOutput !== targetIsOutput) {
-                    const pr = el.getBoundingClientRect();
-                    mx = pr.left - cr.left + pr.width / 2;
-                    my = pr.top - cr.top + pr.height / 2;
+                    const portPos = this.getPortCenter(el.dataset.id!, el.dataset.port!, targetIsOutput);
+                    mx = portPos.x;
+                    my = portPos.y;
                     el.classList.add('snap-target');
                 }
             }
@@ -532,6 +672,7 @@ export class NodeEditor {
     };
 
     private onMouseUp = (e: MouseEvent) => {
+        this.isPanning = false;
         this.dragging = null;
         if (this.connecting) {
             this.container.querySelectorAll('.port-dot').forEach(p => p.classList.remove('snap-target'));
@@ -557,9 +698,8 @@ export class NodeEditor {
         const cls = isOutput ? 'port-dot-out' : 'port-dot-in';
         const el = this.container.querySelector(`.${cls}[data-id="${nodeId}"][data-port="${portName}"]`) as HTMLElement | null;
         if (!el) return { x: 0, y: 0 };
-        const cr = this.container.getBoundingClientRect();
         const er = el.getBoundingClientRect();
-        return { x: er.left - cr.left + er.width / 2, y: er.top - cr.top + er.height / 2 };
+        return this.screenToCanvas(er.left + er.width / 2, er.top + er.height / 2);
     }
 
     private bezier(x1: number, y1: number, x2: number, y2: number): string {
@@ -581,11 +721,12 @@ export class NodeEditor {
             const hit = document.createElementNS('http://www.w3.org/2000/svg', 'path') as SVGPathElement;
             hit.classList.add('conn-line');
             hit.setAttribute('d', this.bezier(from.x, from.y, to.x, to.y));
-            hit.addEventListener('dblclick', (e) => {
+            hit.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
                 e.stopPropagation();
-                this.graph.disconnect(conn.toId, conn.inputName);
-                this.render();
-                this.onChange();
+                this.contextConn = { fromId: conn.fromId, toId: conn.toId, inputName: conn.inputName };
+                if (this.menuOpen) this.closeMenu();
+                this.openMenuAt(e.clientX, e.clientY);
             });
             this.svg.appendChild(hit);
 
@@ -599,10 +740,43 @@ export class NodeEditor {
 
     addModule(type: ModuleType) {
         const count = this.graph.modules.size;
-        const pos = this.menuSpawnPos
-            ? { x: this.menuSpawnPos.x - 96, y: this.menuSpawnPos.y - 60 }
-            : { x: 80 + (count % 4) * 240, y: 80 + Math.floor(count / 4) * 260 };
-        this.graph.addModule(type, {}, pos);
+        let pos;
+        if (this.menuSpawnPos) {
+            const cp = this.screenToCanvas(this.menuSpawnPos.x, this.menuSpawnPos.y);
+            pos = { x: cp.x - 96, y: cp.y - 60 };
+        } else {
+            pos = { x: 80 + (count % 4) * 240, y: 80 + Math.floor(count / 4) * 260 };
+        }
+
+        const newId = this.graph.addModule(type, {}, pos);
+
+        if (this.contextConn) {
+            const { fromId, toId, inputName } = this.contextConn;
+            const fromMod = this.graph.getModule(fromId);
+            const toMod = this.graph.getModule(toId);
+            const newMod = this.graph.getModule(newId);
+
+            if (fromMod && toMod && newMod) {
+                const fromOutputs = PORT_DEFS[fromMod.type].outputs;
+                const newInputs = PORT_DEFS[newMod.type].inputs;
+                const newOutputs = PORT_DEFS[newMod.type].outputs;
+
+                const sourcePort = fromOutputs[0];
+                const isSourceUv = sourcePort === UV_PORT;
+                const compatibleInput = newInputs.find(i => isSourceUv ? i === UV_PORT : i !== UV_PORT);
+
+                const isTargetUv = inputName === UV_PORT;
+                const compatibleOutput = newOutputs.find(o => isTargetUv ? o === UV_PORT : o !== UV_PORT);
+
+                if (compatibleInput && compatibleOutput) {
+                    this.graph.disconnect(toId, inputName);
+                    this.graph.connect(fromId, newId, compatibleInput);
+                    this.graph.connect(newId, toId, inputName);
+                }
+            }
+            this.contextConn = null;
+        }
+
         this.render();
         this.onChange();
     }

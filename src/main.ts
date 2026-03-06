@@ -324,6 +324,18 @@ class TVSynth {
         const trigger = document.querySelector('.menu-trigger') as HTMLElement;
         if (trigger) toolbar.appendChild(trigger);
 
+        const tidyBtn = document.createElement('button');
+        tidyBtn.className = 'toolbar-btn';
+        tidyBtn.innerHTML = 'Auto Tidy';
+        tidyBtn.onclick = () => this.nodeEditor.tidyNodes();
+        toolbar.appendChild(tidyBtn);
+
+        const helpBtn = document.createElement('button');
+        helpBtn.className = 'toolbar-btn';
+        helpBtn.innerHTML = 'Help';
+        helpBtn.onclick = () => this.nodeEditor.toggleHelp();
+        toolbar.appendChild(helpBtn);
+
         const saveBtn = document.createElement('button');
         saveBtn.className = 'toolbar-btn';
         saveBtn.innerHTML = 'Save Patch';

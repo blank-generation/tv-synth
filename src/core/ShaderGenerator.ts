@@ -136,6 +136,73 @@ void main() {
         return conn ? `out_${conn.fromId}.xy` : 'uv';
     }
 
+    // Re-evaluates a SOURCE node inline using an explicit UV expression.
+    // Used by BLEND to sample its A/B inputs at a transformed UV coordinate.
+    // Returns GLSL code that declares a new vec3 variable named out_<id><suffix>.
+    private static generateChunkWithUv(mod: ModuleState, uvExpr: string, suffix: string): string {
+        const id = mod.id;
+        const out = `out_${id}${suffix}`;
+        let c = '';
+        switch (mod.type) {
+            case 'OSC': {
+                const dir = this.i(mod.params.dir);
+                const freq = this.f(mod.params.freq, 5);
+                const speed = this.f(mod.params.speed, 1);
+                const type = this.i(mod.params.type);
+                const chroma = this.f(mod.params.chromaOffset, 0);
+                c += `    vec3 ${out} = vec3(
+`;
+                c += `        getOsc(getRamp(${uvExpr}, ${dir}) * ${freq} + uTime * ${speed} + ${chroma}, ${type}),
+`;
+                c += `        getOsc(getRamp(${uvExpr}, ${dir}) * ${freq} + uTime * ${speed},             ${type}),
+`;
+                c += `        getOsc(getRamp(${uvExpr}, ${dir}) * ${freq} + uTime * ${speed} - ${chroma}, ${type})
+`;
+                c += `    );
+`;
+                break;
+            }
+            case 'NOISE': {
+                const scale = this.f(mod.params.scale, 4);
+                const speed = this.f(mod.params.speed, 0.5);
+                c += `    vec3 ${out} = vec3(valueNoise(${uvExpr} * ${scale} + uTime * ${speed}));
+`;
+                break;
+            }
+            case 'SHAPE': {
+                const type = this.i(mod.params.type);
+                const radius = this.f(mod.params.radius, 0.4);
+                const smooth = this.f(Math.max(parseFloat(mod.params.smooth ?? 0.02), 0.001), 0.02);
+                const distVar = `dist${suffix}_${id}`;
+                if (type === 1) c += `    float ${distVar} = max(abs(${uvExpr}.x - 0.5), abs(${uvExpr}.y - 0.5)) * 2.0;
+`;
+                else if (type === 2) c += `    float ${distVar} = min(abs(${uvExpr}.x - 0.5), abs(${uvExpr}.y - 0.5)) * 2.0;
+`;
+                else c += `    float ${distVar} = length(${uvExpr} - 0.5) * 2.0;
+`;
+                c += `    vec3 ${out} = vec3(1.0 - smoothstep(${radius} - ${smooth}, ${radius} + ${smooth}, ${distVar}));
+`;
+                break;
+            }
+            case 'CAMERA': {
+                const flip = this.i(mod.params.flip ?? 1);
+                const samp = flip ? `vec2(1.0 - ${uvExpr}.x, ${uvExpr}.y)` : uvExpr;
+                c += `    vec3 ${out} = texture2D(tCam, ${samp}).rgb;
+`;
+                break;
+            }
+            case 'SCREEN':
+                c += `    vec3 ${out} = texture2D(tScreen, ${uvExpr}).rgb;
+`;
+                break;
+            default:
+                // Non-source node (COLOR, BLEND, etc.): use already-computed value unchanged
+                c += `    vec3 ${out} = out_${id};
+`;
+        }
+        return c;
+    }
+
     private static generateChunk(mod: ModuleState, graph: ModuleGraph): string {
         const id = mod.id;
         let c = `\n    // [${mod.type}] ${id.slice(0, 8)}\n`;
@@ -145,11 +212,11 @@ void main() {
             // ── Sources ────────────────────────────────────────────────────────
 
             case 'OSC': {
-                const uvE   = this.getUv(id, graph);
-                const dir   = this.i(mod.params.dir);
-                const freq  = this.f(mod.params.freq, 5);
+                const uvE = this.getUv(id, graph);
+                const dir = this.i(mod.params.dir);
+                const freq = this.f(mod.params.freq, 5);
                 const speed = this.f(mod.params.speed, 1);
-                const type  = this.i(mod.params.type);
+                const type = this.i(mod.params.type);
                 const chroma = this.f(mod.params.chromaOffset, 0);
                 c += `    vec3 out_${id} = vec3(\n`;
                 c += `        getOsc(getRamp(${uvE}, ${dir}) * ${freq} + uTime * ${speed} + ${chroma}, ${type}),\n`;
@@ -160,7 +227,7 @@ void main() {
             }
 
             case 'NOISE': {
-                const uvE   = this.getUv(id, graph);
+                const uvE = this.getUv(id, graph);
                 const scale = this.f(mod.params.scale, 4);
                 const speed = this.f(mod.params.speed, 0.5);
                 c += `    vec3 out_${id} = vec3(valueNoise(${uvE} * ${scale} + uTime * ${speed}));\n`;
@@ -168,8 +235,8 @@ void main() {
             }
 
             case 'SHAPE': {
-                const uvE    = this.getUv(id, graph);
-                const type   = this.i(mod.params.type);
+                const uvE = this.getUv(id, graph);
+                const type = this.i(mod.params.type);
                 const radius = this.f(mod.params.radius, 0.4);
                 const smooth = this.f(Math.max(parseFloat(mod.params.smooth ?? 0.02), 0.001), 0.02);
                 if (type === 1) {
@@ -186,11 +253,11 @@ void main() {
             // ── Color / mix ────────────────────────────────────────────────────
 
             case 'COLOR': {
-                const src        = this.inp(id, 'src', graph);
-                const hue        = this.f(mod.params.hue, 0);
+                const src = this.inp(id, 'src', graph);
+                const hue = this.f(mod.params.hue, 0);
                 const saturation = this.f(mod.params.saturation, 1);
                 const brightness = this.f(mod.params.brightness, 1);
-                const contrast   = this.f(mod.params.contrast, 1);
+                const contrast = this.f(mod.params.contrast, 1);
                 c += `    vec3 hsv_${id} = rgb2hsv(${src});\n`;
                 c += `    hsv_${id}.x = fract(hsv_${id}.x + ${hue});\n`;
                 c += `    hsv_${id}.y = clamp(hsv_${id}.y * ${saturation}, 0.0, 1.0);\n`;
@@ -200,11 +267,42 @@ void main() {
             }
 
             case 'BLEND': {
-                const mode     = this.i(mod.params.mode);
-                const amount   = this.f(mod.params.amount, 0.5);
+                const mode = this.i(mod.params.mode);
+                const amount = this.f(mod.params.amount, 0.5);
                 const fallback = mode === 2 ? 'vec3(1.0)' : 'vec3(0.0)';
-                const a = this.inp(id, 'a', graph, fallback);
-                const b = this.inp(id, 'b', graph, fallback);
+
+                const uvConn = graph.connections.find(c => c.toId === id && c.inputName === 'uv');
+
+                let a: string;
+                let b: string;
+
+                if (uvConn) {
+                    // Re-evaluate A and B inline using the transformed UV so they are
+                    // actually sampled in the new coordinate space.
+                    const uvExpr = `out_${uvConn.fromId}.xy`;
+                    const aConn = graph.connections.find(c => c.toId === id && c.inputName === 'a');
+                    const bConn = graph.connections.find(c => c.toId === id && c.inputName === 'b');
+                    const sfxA = `_ba${id.slice(0, 6)}`;
+                    const sfxB = `_bb${id.slice(0, 6)}`;
+                    if (aConn) {
+                        const aMod = graph.modules.get(aConn.fromId);
+                        if (aMod) {
+                            c += this.generateChunkWithUv(aMod, uvExpr, sfxA);
+                            a = `out_${aConn.fromId}${sfxA}`;
+                        } else { a = fallback; }
+                    } else { a = fallback; }
+                    if (bConn) {
+                        const bMod = graph.modules.get(bConn.fromId);
+                        if (bMod) {
+                            c += this.generateChunkWithUv(bMod, uvExpr, sfxB);
+                            b = `out_${bConn.fromId}${sfxB}`;
+                        } else { b = fallback; }
+                    } else { b = fallback; }
+                } else {
+                    a = this.inp(id, 'a', graph, fallback);
+                    b = this.inp(id, 'b', graph, fallback);
+                }
+
                 const ops: Record<number, string> = {
                     0: `mix(${a}, ${b}, ${amount})`,
                     1: `(${a} + ${b}) * 0.5`,
@@ -212,14 +310,16 @@ void main() {
                     3: `abs(${a} - ${b})`,
                     4: `1.0 - (1.0 - ${a}) * (1.0 - ${b})`,
                 };
-                c += `    vec3 out_${id} = ${ops[mode] ?? ops[0]};\n`;
+                c += `    vec3 out_${id} = ${ops[mode] ?? ops[0]};
+`;
                 break;
             }
 
             case 'FEEDBACK': {
-                const src   = this.inp(id, 'src', graph, 'vec3(0.0)');
+                const uvE = this.getUv(id, graph);
+                const src = this.inp(id, 'src', graph, 'vec3(0.0)');
                 const decay = this.f(mod.params.decay, 0.8);
-                c += `    vec3 out_${id} = mix(${src}, texture2D(tFeedback, uv).rgb, ${decay});\n`;
+                c += `    vec3 out_${id} = mix(${src}, texture2D(tFeedback, ${uvE}).rgb, ${decay});\n`;
                 break;
             }
 
@@ -227,7 +327,7 @@ void main() {
             // All transform outputs are vec3(u, v, 0.0) — connect to any 'uv' input port
 
             case 'ROTATE': {
-                const uvE   = this.getUv(id, graph);
+                const uvE = this.getUv(id, graph);
                 const angle = this.f(mod.params.angle, 0);
                 const speed = this.f(mod.params.speed, 0);
                 c += `    vec2 rUv_${id} = ${uvE} - 0.5;\n`;
@@ -241,16 +341,16 @@ void main() {
 
             case 'SCALE': {
                 const uvE = this.getUv(id, graph);
-                const sx  = this.f(mod.params.sx, 1);
-                const sy  = this.f(mod.params.sy, 1);
+                const sx = this.f(mod.params.sx, 1);
+                const sy = this.f(mod.params.sy, 1);
                 c += `    vec3 out_${id} = vec3((${uvE} - 0.5) / vec2(${sx}, ${sy}) + 0.5, 0.0);\n`;
                 break;
             }
 
             case 'SCROLL': {
-                const uvE    = this.getUv(id, graph);
-                const tx     = this.f(mod.params.tx, 0);
-                const ty     = this.f(mod.params.ty, 0);
+                const uvE = this.getUv(id, graph);
+                const tx = this.f(mod.params.tx, 0);
+                const ty = this.f(mod.params.ty, 0);
                 const speedX = this.f(mod.params.speedX, 0.1);
                 const speedY = this.f(mod.params.speedY, 0);
                 c += `    vec3 out_${id} = vec3(fract(${uvE} + vec2(${tx} + uTime * ${speedX}, ${ty} + uTime * ${speedY})), 0.0);\n`;
@@ -258,7 +358,7 @@ void main() {
             }
 
             case 'KALEID': {
-                const uvE   = this.getUv(id, graph);
+                const uvE = this.getUv(id, graph);
                 const sides = Math.max(2, this.i(mod.params.sides) || 4);
                 c += `    vec2 kUv_${id} = ${uvE} - 0.5;\n`;
                 c += `    float kR_${id}   = length(kUv_${id});\n`;
@@ -271,7 +371,7 @@ void main() {
             }
 
             case 'PIXELATE': {
-                const uvE    = this.getUv(id, graph);
+                const uvE = this.getUv(id, graph);
                 const pixels = this.f(mod.params.pixels, 32);
                 c += `    vec3 out_${id} = vec3(floor(${uvE} * ${pixels}) / ${pixels}, 0.0);\n`;
                 break;
@@ -279,8 +379,8 @@ void main() {
 
             case 'WARP': {
                 // src input is the warp field; its RG channels displace the UV
-                const uvE    = this.getUv(id, graph);
-                const src    = this.inp(id, 'src', graph, 'vec3(0.5)');
+                const uvE = this.getUv(id, graph);
+                const src = this.inp(id, 'src', graph, 'vec3(0.5)');
                 const amount = this.f(mod.params.amount, 0.2);
                 c += `    vec3 out_${id} = vec3(fract(${uvE} + (${src}.xy - 0.5) * ${amount}), 0.0);\n`;
                 break;
@@ -288,8 +388,8 @@ void main() {
 
             case 'MIRROR': {
                 const uvE = this.getUv(id, graph);
-                const mx  = this.f(mod.params.mirrorX ?? 1, 1);
-                const my  = this.f(mod.params.mirrorY ?? 0, 0);
+                const mx = this.f(mod.params.mirrorX ?? 1, 1);
+                const my = this.f(mod.params.mirrorY ?? 0, 0);
                 // mix(original, folded, toggle) — fold = abs(fract(u)*2-1)
                 c += `    vec2 mUv_${id} = ${uvE};\n`;
                 c += `    mUv_${id}.x = mix(mUv_${id}.x, abs(fract(mUv_${id}.x) * 2.0 - 1.0), ${mx});\n`;

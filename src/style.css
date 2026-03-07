@@ -86,6 +86,11 @@ body {
     pointer-events: auto;
 }
 
+#node-editor.pending-connect,
+#node-editor.pending-connect * {
+    cursor: crosshair !important;
+}
+
 #node-editor.panning {
     cursor: grabbing !important;
 }
@@ -265,6 +270,18 @@ body {
     border-color: #00cec9;
     background: rgba(0, 206, 201, 0.4);
     box-shadow: 0 0 6px #00cec9;
+}
+
+.port-dot.connected {
+    background: var(--node-color, #888);
+    box-shadow: 0 0 8px var(--node-color, #888);
+    border-color: #fff;
+}
+
+.port-dot.port-uv.connected {
+    background: #00cec9;
+    box-shadow: 0 0 8px #00cec9;
+    border-color: #fff;
 }
 
 /* ── Node params ────────────────────────────────────────────────────────── */

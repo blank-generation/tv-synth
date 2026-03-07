@@ -9,8 +9,8 @@ const PORT_DEFS: Record<string, { inputs: string[]; outputs: string[] }> = {
     CAMERA: { inputs: ['uv'], outputs: ['out'] },
     SCREEN: { inputs: ['uv'], outputs: ['out'] },
     COLOR: { inputs: ['src'], outputs: ['out'] },
-    BLEND: { inputs: ['a', 'b'], outputs: ['out'] },
-    FEEDBACK: { inputs: ['src'], outputs: ['out'] },
+    BLEND: { inputs: ['uv', 'a', 'b'], outputs: ['out'] },
+    FEEDBACK: { inputs: ['uv', 'src'], outputs: ['out'] },
     ROTATE: { inputs: ['uv'], outputs: ['uv'] },
     SCALE: { inputs: ['uv'], outputs: ['uv'] },
     SCROLL: { inputs: ['uv'], outputs: ['uv'] },
@@ -116,6 +116,13 @@ export class NodeEditor {
         this.container.addEventListener('wheel', this.onWheel, { passive: false });
         bg.addEventListener('mousedown', this.onMouseDown);
 
+        // Click-to-connect: clicking outside any port cancels a pending connection
+        window.addEventListener('click', this.onWindowClick);
+        // Escape key cancels
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && this.connecting) this.cancelConnect();
+        });
+
         window.addEventListener('contextmenu', (e) => {
             const target = e.target as HTMLElement;
             if (target.closest('.node-card') || target.closest('#preview') || target.closest('.module-menu') || target.closest('.menu-trigger') || target.closest('.port-dot')) return;
@@ -185,8 +192,11 @@ export class NodeEditor {
                 <div class="help-item"><span class="key">Wheel</span> Zoom in/out</div>
                 <div class="help-item"><span class="key">Middle Click</span> Pan graph</div>
                 <div class="help-item"><span class="key">Alt+LClick</span> Pan graph</div>
-                <div class="help-item"><span class="key">RClick Wire</span> Insert node</div>
+                <div class="help-item"><span class="key">Click Port</span> Start wire</div>
+                <div class="help-item"><span class="key">Click Port</span> Connect / cancel</div>
+                <div class="help-item"><span class="key">Escape</span> Cancel wire</div>
                 <div class="help-item"><span class="key">DblClick Wire</span> Disconnect</div>
+                <div class="help-item"><span class="key">RClick Wire</span> Insert node</div>
                 <div class="help-item"><span class="key">RClick BG</span> Add module</div>
             </div>
             <button class="help-close">Got it</button>
@@ -230,11 +240,47 @@ export class NodeEditor {
         Object.keys(layerMap).forEach(levelStr => {
             const level = parseInt(levelStr);
             const ids = layerMap[level];
+
+            // Sort ids by their primary input's Y position to minimize wire crossing
+            ids.sort((a, b) => {
+                const aInputs = this.graph.connections.filter(c => c.toId === a);
+                const bInputs = this.graph.connections.filter(c => c.toId === b);
+                const aAvgY = aInputs.length > 0 ? aInputs.reduce((sum, c) => sum + (this.graph.getModule(c.fromId)?.position.y || 0), 0) / aInputs.length : 0;
+                const bAvgY = bInputs.length > 0 ? bInputs.reduce((sum, c) => sum + (this.graph.getModule(c.fromId)?.position.y || 0), 0) / bInputs.length : 0;
+                return aAvgY - bAvgY;
+            });
+
+            const totalNodes = ids.length;
+            const columnHeight = (totalNodes - 1) * 280;
+            const startY = 150 - columnHeight / 2; // Center column roughly at Y=150
+
             ids.forEach((id, i) => {
                 const mod = this.graph.getModule(id)!;
-                mod.position.x = 50 + level * 250;
-                mod.position.y = 50 + i * 280;
+                mod.position.x = 50 + level * 280;
+
+                // Try to center node between its inputs if possible
+                const inputs = this.graph.connections.filter(c => c.toId === id);
+                if (inputs.length > 0) {
+                    const avgInputY = inputs.reduce((sum, c) => {
+                        const fromMod = this.graph.getModule(c.fromId);
+                        return sum + (fromMod ? fromMod.position.y : 0);
+                    }, 0) / inputs.length;
+                    mod.position.y = avgInputY;
+                } else {
+                    mod.position.y = startY + i * 280;
+                }
             });
+
+            // Adjust nodes in this layer that might overlap
+            ids.sort((a, b) => this.graph.getModule(a)!.position.y - this.graph.getModule(b)!.position.y);
+            for (let i = 1; i < ids.length; i++) {
+                const prevMod = this.graph.getModule(ids[i - 1])!;
+                const currMod = this.graph.getModule(ids[i])!;
+                const minDist = 200;
+                if (currMod.position.y < prevMod.position.y + minDist) {
+                    currMod.position.y = prevMod.position.y + minDist;
+                }
+            }
         });
 
         this.render();
@@ -378,12 +424,37 @@ export class NodeEditor {
         row.className = `port-row ${isOutput ? 'port-row-out' : 'port-row-in'}`;
 
         const isUv = portName === UV_PORT;
+        const isConnected = isOutput
+            ? this.graph.connections.some(c => c.fromId === id) // Note: this is simple, might need to match port name if there were multiple outputs
+            : this.graph.connections.some(c => c.toId === id && c.inputName === portName);
+
         const dot = document.createElement('div');
-        dot.className = `port-dot ${isOutput ? 'port-dot-out' : 'port-dot-in'} ${isUv ? 'port-uv' : ''}`;
+        dot.className = `port-dot ${isOutput ? 'port-dot-out' : 'port-dot-in'} ${isUv ? 'port-uv' : ''} ${isConnected ? 'connected' : ''}`;
         dot.dataset.id = id;
         dot.dataset.port = portName;
         dot.dataset.portType = isOutput ? 'output' : 'input';
-        dot.addEventListener('mousedown', e => { e.stopPropagation(); e.preventDefault(); this.startConnect(e, id, portName, isOutput); });
+        dot.addEventListener('click', e => {
+            e.stopPropagation();
+            if (this.connecting) {
+                // Second click — try to complete the connection
+                const targetIsOutput = dot.dataset.portType === 'output';
+                if (this.connecting.isOutput && !targetIsOutput) {
+                    this.graph.connect(this.connecting.fromId, id, portName);
+                    this.cancelConnect();
+                    this.render(); this.onChange();
+                } else if (!this.connecting.isOutput && targetIsOutput) {
+                    this.graph.connect(id, this.connecting.fromId, this.connecting.fromPort);
+                    this.cancelConnect();
+                    this.render(); this.onChange();
+                } else {
+                    // Same polarity — start fresh from this port
+                    this.startConnect(id, portName, isOutput);
+                }
+            } else {
+                // First click — start connecting
+                this.startConnect(id, portName, isOutput);
+            }
+        });
 
         const label = document.createElement('span');
         label.className = `port-label ${isUv ? 'port-label-uv' : ''}`;
@@ -622,12 +693,39 @@ export class NodeEditor {
     }
 
     // --- Connect ---
-    private startConnect(_e: MouseEvent, id: string, port: string, isOutput: boolean) {
+    private startConnect(id: string, port: string, isOutput: boolean) {
+        // If already connecting from same port, cancel (toggle off)
+        if (this.connecting && this.connecting.fromId === id && this.connecting.fromPort === port) {
+            this.cancelConnect();
+            return;
+        }
+        if (this.connecting) this.cancelConnect();
+
         const tmpLine = document.createElementNS('http://www.w3.org/2000/svg', 'path') as SVGPathElement;
         tmpLine.classList.add('conn-temp', port === UV_PORT ? 'conn-temp-uv' : 'conn-temp-sig');
         this.svg.appendChild(tmpLine);
         this.connecting = { fromId: id, fromPort: port, isOutput, tmpLine };
+        this.container.classList.add('pending-connect');
     }
+
+    private cancelConnect() {
+        if (!this.connecting) return;
+        this.container.querySelectorAll('.port-dot').forEach(p => p.classList.remove('snap-target'));
+        this.connecting.tmpLine.remove();
+        this.connecting = null;
+        this.container.classList.remove('pending-connect');
+    }
+
+    private onWindowClick = (e: MouseEvent) => {
+        if (!this.connecting) return;
+        const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+        if (el?.classList.contains('port-dot')) {
+            // Handled directly by the port's own click listener — do nothing here
+            return;
+        }
+        // Clicked on empty space — cancel
+        this.cancelConnect();
+    };
 
     private onMouseMove = (e: MouseEvent) => {
         if (this.isPanning) {
@@ -671,27 +769,9 @@ export class NodeEditor {
         }
     };
 
-    private onMouseUp = (e: MouseEvent) => {
+    private onMouseUp = (_e: MouseEvent) => {
         this.isPanning = false;
         this.dragging = null;
-        if (this.connecting) {
-            this.container.querySelectorAll('.port-dot').forEach(p => p.classList.remove('snap-target'));
-            const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
-            if (el?.classList.contains('port-dot')) {
-                const targetId = el.dataset.id!;
-                const targetPort = el.dataset.port!;
-                const targetIsOutput = el.dataset.portType === 'output';
-                if (this.connecting.isOutput && !targetIsOutput) {
-                    this.graph.connect(this.connecting.fromId, targetId, targetPort);
-                    this.render(); this.onChange();
-                } else if (!this.connecting.isOutput && targetIsOutput) {
-                    this.graph.connect(targetId, this.connecting.fromId, this.connecting.fromPort);
-                    this.render(); this.onChange();
-                }
-            }
-            this.connecting.tmpLine.remove();
-            this.connecting = null;
-        }
     };
 
     private getPortCenter(nodeId: string, portName: string, isOutput: boolean): { x: number; y: number } {
@@ -727,6 +807,13 @@ export class NodeEditor {
                 this.contextConn = { fromId: conn.fromId, toId: conn.toId, inputName: conn.inputName };
                 if (this.menuOpen) this.closeMenu();
                 this.openMenuAt(e.clientX, e.clientY);
+            });
+            hit.addEventListener('dblclick', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                this.graph.disconnect(conn.toId, conn.inputName);
+                this.render();
+                this.onChange();
             });
             this.svg.appendChild(hit);
 
@@ -784,5 +871,6 @@ export class NodeEditor {
     destroy() {
         window.removeEventListener('mousemove', this.onMouseMove);
         window.removeEventListener('mouseup', this.onMouseUp);
+        window.removeEventListener('click', this.onWindowClick);
     }
 }

@@ -506,6 +506,76 @@ void main() {
                 break;
             }
 
+            // ── Glitch / Analog ────────────────────────────────────────────────
+
+            case 'GLITCH': {
+                // Faithful port of v002 Analog Glitch (https://github.com/v002/v002-Glitch)
+                // tex0 = source image, tex1 = bars signal (we simulate with a smooth LFO)
+                const uvE        = this.getUv(id, graph);
+                const distortion = this.f(mod.params.distortion, 0.5);
+                const barsamount = this.f(mod.params.barsamount, 0.4);
+                const barsRate   = this.f(mod.params.barsRate,  1.5);
+                const hsync      = this.f(mod.params.hsync, 0);
+                const vsync      = this.f(mod.params.vsync, 0);
+
+                const srcConn = graph.connections.find(conn => conn.toId === id && conn.inputName === 'src');
+                if (srcConn) {
+                    const srcMod = graph.modules.get(srcConn.fromId);
+                    if (srcMod) {
+                        // Use last 8 chars of id (random part) for unique suffixes
+                        const rnd    = id.slice(-8);
+                        const sfxKa  = `_gka${rnd}`;
+                        const sfxKb  = `_gkb${rnd}`;
+                        const sfxFin = `_gfn${rnd}`;
+
+                        // ── Step 1: sample source at (y,y) and (1-y, 1-y) to get luma key ──
+                        // This is v002's core technique: sampling the image along its own diagonal
+                        // produces per-scanline values that drive content-aware X displacement.
+                        c += this.generateChunkWithUv(srcMod, `vec2(${uvE}.y, ${uvE}.y)`,              sfxKa);
+                        c += this.generateChunkWithUv(srcMod, `vec2(1.0 - ${uvE}.y, 1.0 - ${uvE}.y)`, sfxKb);
+
+                        // ── Step 2: simulate bars signal (v002's tex1) ──
+                        // v002 feeds a real video signal as tex1 — we simulate with a smooth LFO
+                        // plus a harmonic to mimic the waveshaping of an analog bars generator.
+                        c += `    float gBars_${id} = abs(sin(uTime * ${barsRate})) * 0.85 + abs(sin(uTime * ${barsRate} * 2.7)) * 0.15;\n`;
+
+                        // ── Step 3: v002 luma key formula ──
+                        // key = sample(y,y) + sample(1-y,1-y) - bars
+                        // d = (key.r + key.g + key.b) / 3
+                        c += `    vec3  gKey_${id} = out_${srcConn.fromId}${sfxKa} + out_${srcConn.fromId}${sfxKb} - vec3(gBars_${id});\n`;
+                        c += `    float gD_${id}   = (gKey_${id}.r + gKey_${id}.g + gKey_${id}.b) / 3.0;\n`;
+
+                        // ── Step 4: apply distortion + sync (v002 formula) ──
+                        // point.x -= d * distortion * 0.1
+                        // texcoord = mod(point + mod(vec2(hsync, vsync), 1.0), 1.0)
+                        const finalUv = `mod(vec2(${uvE}.x - gD_${id} * ${distortion} * 0.1, ${uvE}.y) + mod(vec2(${hsync}, ${vsync}), 1.0), 1.0)`;
+                        c += this.generateChunkWithUv(srcMod, finalUv, sfxFin);
+
+                        // ── Step 5: mix result with bars-modulated result (v002 output formula) ──
+                        // gl_FragColor = mix(result, bars*result, barsamount)
+                        c += `    vec3 gRes_${id} = out_${srcConn.fromId}${sfxFin};\n`;
+                        c += `    vec3 out_${id}  = mix(gRes_${id}, vec3(gBars_${id}) * gRes_${id}, ${barsamount});\n`;
+                    } else {
+                        c += `    vec3 out_${id} = vec3(0.0);\n`;
+                    }
+                } else {
+                    c += `    vec3 out_${id} = vec3(0.0);\n`;
+                }
+                break;
+            }
+
+            case 'COLORIZE': {
+                // Mainbow-style luma→hue colorizer: maps brightness to a position on the color wheel
+                const src        = this.inp(id, 'src', graph);
+                const hueOffset  = this.f(mod.params.hueOffset, 0);
+                const hueRange   = this.f(mod.params.hueRange, 1);
+                const saturation = this.f(mod.params.saturation, 1);
+                c += `    float cLuma_${id} = dot(${src}, vec3(0.299, 0.587, 0.114));\n`;
+                c += `    float cHue_${id}  = fract(${hueOffset} + cLuma_${id} * ${hueRange});\n`;
+                c += `    vec3  out_${id}   = hsv2rgb(vec3(cHue_${id}, ${saturation}, cLuma_${id}));\n`;
+                break;
+            }
+
             default:
                 c += `    vec3 out_${id} = vec3(0.0);\n`;
         }

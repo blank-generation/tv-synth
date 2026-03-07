@@ -7,6 +7,8 @@ export type ModuleType =
     | 'COLOR' | 'BLEND' | 'FEEDBACK'
     // UV transforms
     | 'ROTATE' | 'SCALE' | 'SCROLL' | 'KALEID' | 'PIXELATE' | 'WARP' | 'MIRROR'
+    // Glitch / analog
+    | 'GLITCH' | 'COLORIZE'
     // Sink
     | 'OUTPUT';
 

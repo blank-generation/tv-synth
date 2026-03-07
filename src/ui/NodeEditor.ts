@@ -19,6 +19,8 @@ const PORT_DEFS: Record<string, { inputs: string[]; outputs: string[] }> = {
     PIXELATE: { inputs: ['uv'], outputs: ['uv'] },
     WARP: { inputs: ['uv', 'src'], outputs: ['uv'] },
     MIRROR: { inputs: ['uv'], outputs: ['uv'] },
+    GLITCH: { inputs: ['uv', 'src'], outputs: ['out'] },
+    COLORIZE: { inputs: ['src'], outputs: ['out'] },
     OUTPUT: { inputs: ['signal'], outputs: [] },
 };
 
@@ -39,6 +41,8 @@ const MODULE_COLOR: Record<string, string> = {
     PIXELATE: '#00b894',
     WARP: '#e84393',
     MIRROR: '#81ecec',
+    GLITCH: '#ff4757',
+    COLORIZE: '#f9ca24',
     OUTPUT: '#b2bec3',
 };
 
@@ -47,6 +51,7 @@ const MENU_GROUPS: { label: string; types: ModuleType[] }[] = [
     { label: 'Live Input', types: ['CAMERA', 'SCREEN'] },
     { label: 'Color / Mix', types: ['COLOR', 'BLEND', 'FEEDBACK'] },
     { label: 'Transforms', types: ['ROTATE', 'SCALE', 'SCROLL', 'KALEID', 'PIXELATE', 'WARP', 'MIRROR'] },
+    { label: 'Effects', types: ['COLORIZE'] },
 ];
 
 interface DragState {
@@ -657,13 +662,51 @@ export class NodeEditor {
                 row('Flip', fl);
                 break;
             }
+            case 'GLITCH': {
+                // v002 Analog Glitch params
+                const di = this.makeSlider(0, 1, 0.01, mod.params.distortion ?? 0.5);
+                di.addEventListener('input', () => { mod.params.distortion = parseFloat(di.value); this.onChange(); });
+                row('Distort', di);
+                const ba = this.makeSlider(0, 1, 0.01, mod.params.barsamount ?? 0.4);
+                ba.addEventListener('input', () => { mod.params.barsamount = parseFloat(ba.value); this.onChange(); });
+                row('Bars Amt', ba);
+                const br = this.makeSlider(0.1, 10, 0.1, mod.params.barsRate ?? 1.5);
+                br.addEventListener('input', () => { mod.params.barsRate = parseFloat(br.value); this.onChange(); });
+                row('Bars Rate', br);
+                const hs = this.makeSlider(0, 1, 0.005, mod.params.hsync ?? 0);
+                hs.addEventListener('input', () => { mod.params.hsync = parseFloat(hs.value); this.onChange(); });
+                row('H-Sync', hs);
+                const vs = this.makeSlider(0, 1, 0.005, mod.params.vsync ?? 0);
+                vs.addEventListener('input', () => { mod.params.vsync = parseFloat(vs.value); this.onChange(); });
+                row('V-Sync', vs);
+                break;
+            }
+            case 'COLORIZE': {
+                // Mainbow-style luma→hue colorizer
+                const ho = this.makeSlider(0, 1, 0.005, mod.params.hueOffset ?? 0);
+                ho.addEventListener('input', () => { mod.params.hueOffset = parseFloat(ho.value); this.onChange(); });
+                row('Hue Offset', ho);
+                const hr = this.makeSlider(0.1, 4, 0.05, mod.params.hueRange ?? 1);
+                hr.addEventListener('input', () => { mod.params.hueRange = parseFloat(hr.value); this.onChange(); });
+                row('Hue Range', hr);
+                const sa = this.makeSlider(0, 1, 0.01, mod.params.saturation ?? 1);
+                sa.addEventListener('input', () => { mod.params.saturation = parseFloat(sa.value); this.onChange(); });
+                row('Sat', sa);
+                break;
+            }
             case 'OUTPUT': {
                 const gr = this.makeSlider(0, 0.3, 0.002, mod.params.noiseAmount ?? 0);
                 gr.addEventListener('input', () => { mod.params.noiseAmount = parseFloat(gr.value); this.onChange(); });
                 row('Grain', gr);
+                const ns = this.makeSlider(1, 8, 0.5, mod.params.noiseScale ?? 1);
+                ns.addEventListener('input', () => { mod.params.noiseScale = parseFloat(ns.value); this.onChange(); });
+                row('Grain Size', ns);
                 const sc = this.makeSlider(0, 1, 0.01, mod.params.scanlineIntensity ?? 0);
                 sc.addEventListener('input', () => { mod.params.scanlineIntensity = parseFloat(sc.value); this.onChange(); });
                 row('Scanlines', sc);
+                const hs = this.makeSlider(0, 1, 0.01, mod.params.hSyncJitter ?? 0);
+                hs.addEventListener('input', () => { mod.params.hSyncJitter = parseFloat(hs.value); this.onChange(); });
+                row('H-Sync', hs);
                 const crt = this.makeSlider(0, 0.5, 0.005, mod.params.crtWarp ?? 0);
                 crt.addEventListener('input', () => { mod.params.crtWarp = parseFloat(crt.value); this.onChange(); });
                 row('CRT Warp', crt);

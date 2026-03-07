@@ -241,6 +241,8 @@ class TVSynth {
                 uCurvature: { value: 0 },
                 uChromaticAberration: { value: 0 },
                 uNoiseAmount: { value: 0 },
+                uNoiseScale: { value: 1 },
+                uHSyncJitter: { value: 0 },
                 uTime: { value: 0 },
             },
             fragmentShader: postFrag,
@@ -286,8 +288,10 @@ class TVSynth {
         const outputMod = Array.from(this.graph.modules.values()).find(m => m.type === 'OUTPUT');
         if (outputMod) {
             this.postMaterial.uniforms.uNoiseAmount.value = outputMod.params.noiseAmount ?? 0;
+            this.postMaterial.uniforms.uNoiseScale.value = outputMod.params.noiseScale ?? 1;
             this.postMaterial.uniforms.uScanlineIntensity.value = outputMod.params.scanlineIntensity ?? 0;
             this.postMaterial.uniforms.uCurvature.value = outputMod.params.crtWarp ?? 0;
+            this.postMaterial.uniforms.uHSyncJitter.value = outputMod.params.hSyncJitter ?? 0;
         }
     }
 

@@ -2,6 +2,8 @@ import { ModuleGraph, type ModuleType, type ModuleState } from '../core/ModuleGr
 
 const UV_PORT = 'uv';
 
+const CV_PORT = 'cv';
+
 const PORT_DEFS: Record<string, { inputs: string[]; outputs: string[] }> = {
     OSC: { inputs: ['uv'], outputs: ['out'] },
     NOISE: { inputs: ['uv'], outputs: ['out'] },
@@ -21,6 +23,7 @@ const PORT_DEFS: Record<string, { inputs: string[]; outputs: string[] }> = {
     MIRROR: { inputs: ['uv'], outputs: ['uv'] },
     GLITCH: { inputs: ['uv', 'src'], outputs: ['out'] },
     COLORIZE: { inputs: ['src'], outputs: ['out'] },
+    LFO: { inputs: [], outputs: ['cv'] },
     OUTPUT: { inputs: ['signal'], outputs: [] },
 };
 
@@ -43,6 +46,7 @@ const MODULE_COLOR: Record<string, string> = {
     MIRROR: '#81ecec',
     GLITCH: '#ff4757',
     COLORIZE: '#f9ca24',
+    LFO: '#e8b400',
     OUTPUT: '#b2bec3',
 };
 
@@ -51,7 +55,8 @@ const MENU_GROUPS: { label: string; types: ModuleType[] }[] = [
     { label: 'Live Input', types: ['CAMERA', 'SCREEN'] },
     { label: 'Color / Mix', types: ['COLOR', 'BLEND', 'FEEDBACK'] },
     { label: 'Transforms', types: ['ROTATE', 'SCALE', 'SCROLL', 'KALEID', 'PIXELATE', 'WARP', 'MIRROR'] },
-    { label: 'Effects', types: ['COLORIZE'] },
+    { label: 'Effects', types: ['COLORIZE', 'GLITCH'] },
+    { label: 'Animate', types: ['LFO'] },
 ];
 
 interface DragState {
@@ -290,6 +295,15 @@ export class NodeEditor {
             }
         });
 
+        // Pin OUTPUT node to bottom-right so it stays clear of the preview panel
+        const outputMod = mods.find(m => m.type === 'OUTPUT');
+        if (outputMod) {
+            const maxX = Math.max(...mods.map(m => m.position.x));
+            const maxY = Math.max(...mods.map(m => m.position.y));
+            outputMod.position.x = maxX;
+            outputMod.position.y = maxY + 240;
+        }
+
         this.render();
         this.onChange();
     }
@@ -442,25 +456,7 @@ export class NodeEditor {
         dot.dataset.portType = isOutput ? 'output' : 'input';
         dot.addEventListener('click', e => {
             e.stopPropagation();
-            if (this.connecting) {
-                // Second click — try to complete the connection
-                const targetIsOutput = dot.dataset.portType === 'output';
-                if (this.connecting.isOutput && !targetIsOutput) {
-                    this.graph.connect(this.connecting.fromId, id, portName);
-                    this.cancelConnect();
-                    this.render(); this.onChange();
-                } else if (!this.connecting.isOutput && targetIsOutput) {
-                    this.graph.connect(id, this.connecting.fromId, this.connecting.fromPort);
-                    this.cancelConnect();
-                    this.render(); this.onChange();
-                } else {
-                    // Same polarity — start fresh from this port
-                    this.startConnect(id, portName, isOutput);
-                }
-            } else {
-                // First click — start connecting
-                this.startConnect(id, portName, isOutput);
-            }
+            this.handlePortClick(id, portName, isOutput);
         });
 
         const label = document.createElement('span');
@@ -476,6 +472,7 @@ export class NodeEditor {
         const wrap = document.createElement('div');
         wrap.className = 'node-params';
 
+        // row: for selects and non-CV elements
         const row = (label: string, el: HTMLElement) => {
             const r = document.createElement('div');
             r.className = 'node-param-row';
@@ -483,16 +480,52 @@ export class NodeEditor {
             lbl.className = 'param-label';
             lbl.textContent = label;
             r.appendChild(lbl);
-            // Sliders get zero-tick + value readout automatically
-            if (el instanceof HTMLInputElement && el.type === 'range') {
-                r.appendChild(this.wrapSlider(el));
-            } else {
-                r.appendChild(el);
-            }
+            r.appendChild(el);
+            wrap.appendChild(r);
+        };
+
+        // slrow: for slider params that can be driven by an LFO via CV connection
+        const slrow = (label: string, paramName: string, el: HTMLInputElement) => {
+            const r = document.createElement('div');
+            r.className = 'node-param-row';
+            const cvPort = `~${paramName}`;
+            const isCvConn = this.graph.connections.some(c => c.toId === mod.id && c.inputName === cvPort);
+            const cvDot = document.createElement('div');
+            cvDot.className = `port-dot port-dot-in port-dot-cv${isCvConn ? ' connected' : ''}`;
+            cvDot.dataset.id = mod.id;
+            cvDot.dataset.port = cvPort;
+            cvDot.dataset.portType = 'input';
+            cvDot.addEventListener('click', e => { e.stopPropagation(); this.handlePortClick(mod.id, cvPort, false); });
+            r.appendChild(cvDot);
+            const lbl = document.createElement('span');
+            lbl.className = 'param-label';
+            lbl.textContent = label;
+            r.appendChild(lbl);
+            const wrapped = this.wrapSlider(el);
+            if (isCvConn) wrapped.classList.add('cv-driven');
+            r.appendChild(wrapped);
             wrap.appendChild(r);
         };
 
         switch (mod.type) {
+            case 'LFO': {
+                const w = this.makeSelect([['0', 'Sine'], ['1', 'Square'], ['2', 'Tri'], ['3', 'Saw'], ['4', 'RSaw'], ['5', 'Noise']], mod.params.wave ?? 0);
+                w.addEventListener('change', () => { mod.params.wave = parseInt(w.value); this.onChange(); });
+                row('Wave', w);
+                const rt = this.makeSlider(0.01, 20, 0.01, mod.params.rate ?? 1);
+                rt.addEventListener('input', () => { mod.params.rate = parseFloat(rt.value); this.onChange(); });
+                row('Rate', this.wrapSlider(rt));
+                const mn = this.makeSlider(-5, 5, 0.01, mod.params.min ?? 0);
+                mn.addEventListener('input', () => { mod.params.min = parseFloat(mn.value); this.onChange(); });
+                row('Min', this.wrapSlider(mn));
+                const mx2 = this.makeSlider(-5, 5, 0.01, mod.params.max ?? 1);
+                mx2.addEventListener('input', () => { mod.params.max = parseFloat(mx2.value); this.onChange(); });
+                row('Max', this.wrapSlider(mx2));
+                const ph = this.makeSlider(0, 1, 0.01, mod.params.phase ?? 0);
+                ph.addEventListener('input', () => { mod.params.phase = parseFloat(ph.value); this.onChange(); });
+                row('Phase', this.wrapSlider(ph));
+                break;
+            }
             case 'OSC': {
                 const d = this.makeSelect([['0', 'H'], ['1', 'V'], ['2', 'Radial'], ['3', 'Diag']], mod.params.dir ?? 0);
                 d.addEventListener('change', () => { mod.params.dir = parseInt(d.value); this.onChange(); });
@@ -502,28 +535,28 @@ export class NodeEditor {
                 row('Wave', w);
                 const f = this.makeSlider(0.1, 30, 0.1, mod.params.freq ?? 5);
                 f.addEventListener('input', () => { mod.params.freq = parseFloat(f.value); this.onChange(); });
-                row('Freq', f);
+                slrow('Freq', 'freq', f);
                 const s = this.makeSlider(-8, 8, 0.05, mod.params.speed ?? 1);
                 s.addEventListener('input', () => { mod.params.speed = parseFloat(s.value); this.onChange(); });
-                row('Speed', s);
+                slrow('Speed', 'speed', s);
                 const c = this.makeSlider(0, 0.2, 0.001, mod.params.chromaOffset ?? 0);
                 c.addEventListener('input', () => { mod.params.chromaOffset = parseFloat(c.value); this.onChange(); });
-                row('Chroma', c);
+                slrow('Chroma', 'chromaOffset', c);
                 const an = this.makeSlider(0, 1, 0.01, mod.params.analog ?? 0);
                 an.addEventListener('input', () => { mod.params.analog = parseFloat(an.value); this.onChange(); });
-                row('Analog', an);
+                slrow('Analog', 'analog', an);
                 break;
             }
             case 'NOISE': {
                 const sc = this.makeSlider(0.5, 20, 0.1, mod.params.scale ?? 4);
                 sc.addEventListener('input', () => { mod.params.scale = parseFloat(sc.value); this.onChange(); });
-                row('Scale', sc);
+                slrow('Scale', 'scale', sc);
                 const sp = this.makeSlider(-4, 4, 0.05, mod.params.speed ?? 0.5);
                 sp.addEventListener('input', () => { mod.params.speed = parseFloat(sp.value); this.onChange(); });
-                row('Speed', sp);
+                slrow('Speed', 'speed', sp);
                 const an = this.makeSlider(0, 1, 0.01, mod.params.analog ?? 0);
                 an.addEventListener('input', () => { mod.params.analog = parseFloat(an.value); this.onChange(); });
-                row('Analog', an);
+                slrow('Analog', 'analog', an);
                 break;
             }
             case 'SHAPE': {
@@ -532,53 +565,52 @@ export class NodeEditor {
                 row('Type', t);
                 const r2 = this.makeSlider(0.01, 0.99, 0.01, mod.params.radius ?? 0.4);
                 r2.addEventListener('input', () => { mod.params.radius = parseFloat(r2.value); this.onChange(); });
-                row('Size', r2);
+                slrow('Size', 'radius', r2);
                 const sm = this.makeSlider(0.001, 0.2, 0.001, mod.params.smooth ?? 0.02);
                 sm.addEventListener('input', () => { mod.params.smooth = parseFloat(sm.value); this.onChange(); });
-                row('Edge', sm);
+                slrow('Edge', 'smooth', sm);
                 const ch = this.makeSlider(0, 0.12, 0.001, mod.params.chroma ?? 0);
                 ch.addEventListener('input', () => { mod.params.chroma = parseFloat(ch.value); this.onChange(); });
-                row('Chroma', ch);
+                slrow('Chroma', 'chroma', ch);
                 const an = this.makeSlider(0, 1, 0.01, mod.params.analog ?? 0);
                 an.addEventListener('input', () => { mod.params.analog = parseFloat(an.value); this.onChange(); });
-                row('Analog', an);
+                slrow('Analog', 'analog', an);
                 break;
             }
-
             case 'HATCH': {
                 const f = this.makeSlider(2, 40, 0.5, mod.params.freq ?? 10);
                 f.addEventListener('input', () => { mod.params.freq = parseFloat(f.value); this.onChange(); });
-                row('Freq', f);
+                slrow('Freq', 'freq', f);
                 const th = this.makeSlider(0.01, 0.99, 0.01, mod.params.thickH ?? 0.3);
                 th.addEventListener('input', () => { mod.params.thickH = parseFloat(th.value); this.onChange(); });
-                row('ThickH', th);
+                slrow('ThickH', 'thickH', th);
                 const tv = this.makeSlider(0.01, 0.99, 0.01, mod.params.thickV ?? 0.3);
                 tv.addEventListener('input', () => { mod.params.thickV = parseFloat(tv.value); this.onChange(); });
-                row('ThickV', tv);
+                slrow('ThickV', 'thickV', tv);
                 const ed = this.makeSlider(0.001, 0.3, 0.001, mod.params.edge ?? 0.01);
                 ed.addEventListener('input', () => { mod.params.edge = parseFloat(ed.value); this.onChange(); });
-                row('Edge', ed);
+                slrow('Edge', 'edge', ed);
                 const ch2 = this.makeSlider(0, 0.12, 0.001, mod.params.chroma ?? 0);
                 ch2.addEventListener('input', () => { mod.params.chroma = parseFloat(ch2.value); this.onChange(); });
-                row('Chroma', ch2);
+                slrow('Chroma', 'chroma', ch2);
                 const an = this.makeSlider(0, 1, 0.01, mod.params.analog ?? 0);
                 an.addEventListener('input', () => { mod.params.analog = parseFloat(an.value); this.onChange(); });
-                row('Analog', an);
+                slrow('Analog', 'analog', an);
                 break;
             }
             case 'COLOR': {
                 const h = this.makeSlider(0, 1, 0.005, mod.params.hue ?? 0);
                 h.addEventListener('input', () => { mod.params.hue = parseFloat(h.value); this.onChange(); });
-                row('Hue', h);
+                slrow('Hue', 'hue', h);
                 const sa = this.makeSlider(0, 3, 0.05, mod.params.saturation ?? 1);
                 sa.addEventListener('input', () => { mod.params.saturation = parseFloat(sa.value); this.onChange(); });
-                row('Sat', sa);
+                slrow('Sat', 'saturation', sa);
                 const b = this.makeSlider(0, 3, 0.05, mod.params.brightness ?? 1);
                 b.addEventListener('input', () => { mod.params.brightness = parseFloat(b.value); this.onChange(); });
-                row('Bright', b);
+                slrow('Bright', 'brightness', b);
                 const co = this.makeSlider(0, 4, 0.05, mod.params.contrast ?? 1);
                 co.addEventListener('input', () => { mod.params.contrast = parseFloat(co.value); this.onChange(); });
-                row('Contrast', co);
+                slrow('Contrast', 'contrast', co);
                 break;
             }
             case 'BLEND': {
@@ -587,46 +619,46 @@ export class NodeEditor {
                 row('Mode', m);
                 const a = this.makeSlider(0, 1, 0.01, mod.params.amount ?? 0.5);
                 a.addEventListener('input', () => { mod.params.amount = parseFloat(a.value); this.onChange(); });
-                row('Mix', a);
+                slrow('Mix', 'amount', a);
                 break;
             }
             case 'FEEDBACK': {
                 const d = this.makeSlider(0, 0.99, 0.005, mod.params.decay ?? 0.8);
                 d.addEventListener('input', () => { mod.params.decay = parseFloat(d.value); this.onChange(); });
-                row('Decay', d);
+                slrow('Decay', 'decay', d);
                 break;
             }
             case 'ROTATE': {
                 const a = this.makeSlider(-3.14159, 3.14159, 0.01, mod.params.angle ?? 0);
                 a.addEventListener('input', () => { mod.params.angle = parseFloat(a.value); this.onChange(); });
-                row('Angle', a);
+                slrow('Angle', 'angle', a);
                 const s = this.makeSlider(-2, 2, 0.01, mod.params.speed ?? 0);
                 s.addEventListener('input', () => { mod.params.speed = parseFloat(s.value); this.onChange(); });
-                row('Speed', s);
+                slrow('Speed', 'speed', s);
                 break;
             }
             case 'SCALE': {
                 const x = this.makeSlider(0.1, 4, 0.01, mod.params.sx ?? 1);
                 x.addEventListener('input', () => { mod.params.sx = parseFloat(x.value); this.onChange(); });
-                row('X', x);
+                slrow('X', 'sx', x);
                 const y = this.makeSlider(0.1, 4, 0.01, mod.params.sy ?? 1);
                 y.addEventListener('input', () => { mod.params.sy = parseFloat(y.value); this.onChange(); });
-                row('Y', y);
+                slrow('Y', 'sy', y);
                 break;
             }
             case 'SCROLL': {
                 const sx = this.makeSlider(-1, 1, 0.005, mod.params.speedX ?? 0.1);
                 sx.addEventListener('input', () => { mod.params.speedX = parseFloat(sx.value); this.onChange(); });
-                row('SpeedX', sx);
+                slrow('SpeedX', 'speedX', sx);
                 const sy = this.makeSlider(-1, 1, 0.005, mod.params.speedY ?? 0);
                 sy.addEventListener('input', () => { mod.params.speedY = parseFloat(sy.value); this.onChange(); });
-                row('SpeedY', sy);
+                slrow('SpeedY', 'speedY', sy);
                 const tx = this.makeSlider(-1, 1, 0.005, mod.params.tx ?? 0);
                 tx.addEventListener('input', () => { mod.params.tx = parseFloat(tx.value); this.onChange(); });
-                row('OffX', tx);
+                slrow('OffX', 'tx', tx);
                 const ty = this.makeSlider(-1, 1, 0.005, mod.params.ty ?? 0);
                 ty.addEventListener('input', () => { mod.params.ty = parseFloat(ty.value); this.onChange(); });
-                row('OffY', ty);
+                slrow('OffY', 'ty', ty);
                 break;
             }
             case 'KALEID': {
@@ -638,13 +670,13 @@ export class NodeEditor {
             case 'PIXELATE': {
                 const p = this.makeSlider(4, 256, 1, mod.params.pixels ?? 32);
                 p.addEventListener('input', () => { mod.params.pixels = parseFloat(p.value); this.onChange(); });
-                row('Pixels', p);
+                slrow('Pixels', 'pixels', p);
                 break;
             }
             case 'WARP': {
                 const a = this.makeSlider(0, 1, 0.005, mod.params.amount ?? 0.2);
                 a.addEventListener('input', () => { mod.params.amount = parseFloat(a.value); this.onChange(); });
-                row('Amount', a);
+                slrow('Amount', 'amount', a);
                 break;
             }
             case 'MIRROR': {
@@ -663,53 +695,51 @@ export class NodeEditor {
                 break;
             }
             case 'GLITCH': {
-                // v002 Analog Glitch params
                 const di = this.makeSlider(0, 1, 0.01, mod.params.distortion ?? 0.5);
                 di.addEventListener('input', () => { mod.params.distortion = parseFloat(di.value); this.onChange(); });
-                row('Distort', di);
+                slrow('Distort', 'distortion', di);
                 const ba = this.makeSlider(0, 1, 0.01, mod.params.barsamount ?? 0.4);
                 ba.addEventListener('input', () => { mod.params.barsamount = parseFloat(ba.value); this.onChange(); });
-                row('Bars Amt', ba);
+                slrow('Bars Amt', 'barsamount', ba);
                 const br = this.makeSlider(0.1, 10, 0.1, mod.params.barsRate ?? 1.5);
                 br.addEventListener('input', () => { mod.params.barsRate = parseFloat(br.value); this.onChange(); });
-                row('Bars Rate', br);
+                slrow('Bars Rate', 'barsRate', br);
                 const hs = this.makeSlider(0, 1, 0.005, mod.params.hsync ?? 0);
                 hs.addEventListener('input', () => { mod.params.hsync = parseFloat(hs.value); this.onChange(); });
-                row('H-Sync', hs);
+                slrow('H-Sync', 'hsync', hs);
                 const vs = this.makeSlider(0, 1, 0.005, mod.params.vsync ?? 0);
                 vs.addEventListener('input', () => { mod.params.vsync = parseFloat(vs.value); this.onChange(); });
-                row('V-Sync', vs);
+                slrow('V-Sync', 'vsync', vs);
                 break;
             }
             case 'COLORIZE': {
-                // Mainbow-style luma→hue colorizer
                 const ho = this.makeSlider(0, 1, 0.005, mod.params.hueOffset ?? 0);
                 ho.addEventListener('input', () => { mod.params.hueOffset = parseFloat(ho.value); this.onChange(); });
-                row('Hue Offset', ho);
+                slrow('Hue Offset', 'hueOffset', ho);
                 const hr = this.makeSlider(0.1, 4, 0.05, mod.params.hueRange ?? 1);
                 hr.addEventListener('input', () => { mod.params.hueRange = parseFloat(hr.value); this.onChange(); });
-                row('Hue Range', hr);
+                slrow('Hue Range', 'hueRange', hr);
                 const sa = this.makeSlider(0, 1, 0.01, mod.params.saturation ?? 1);
                 sa.addEventListener('input', () => { mod.params.saturation = parseFloat(sa.value); this.onChange(); });
-                row('Sat', sa);
+                slrow('Sat', 'saturation', sa);
                 break;
             }
             case 'OUTPUT': {
                 const gr = this.makeSlider(0, 0.3, 0.002, mod.params.noiseAmount ?? 0);
                 gr.addEventListener('input', () => { mod.params.noiseAmount = parseFloat(gr.value); this.onChange(); });
-                row('Grain', gr);
+                row('Grain', this.wrapSlider(gr));
                 const ns = this.makeSlider(1, 8, 0.5, mod.params.noiseScale ?? 1);
                 ns.addEventListener('input', () => { mod.params.noiseScale = parseFloat(ns.value); this.onChange(); });
-                row('Grain Size', ns);
+                row('Grain Size', this.wrapSlider(ns));
                 const sc = this.makeSlider(0, 1, 0.01, mod.params.scanlineIntensity ?? 0);
                 sc.addEventListener('input', () => { mod.params.scanlineIntensity = parseFloat(sc.value); this.onChange(); });
-                row('Scanlines', sc);
+                row('Scanlines', this.wrapSlider(sc));
                 const hs = this.makeSlider(0, 1, 0.01, mod.params.hSyncJitter ?? 0);
                 hs.addEventListener('input', () => { mod.params.hSyncJitter = parseFloat(hs.value); this.onChange(); });
-                row('H-Sync', hs);
+                row('H-Sync', this.wrapSlider(hs));
                 const crt = this.makeSlider(0, 0.5, 0.005, mod.params.crtWarp ?? 0);
                 crt.addEventListener('input', () => { mod.params.crtWarp = parseFloat(crt.value); this.onChange(); });
-                row('CRT Warp', crt);
+                row('CRT Warp', this.wrapSlider(crt));
                 break;
             }
             default:
@@ -718,10 +748,11 @@ export class NodeEditor {
         return wrap;
     }
 
-    // Wraps a range input with: zero-tick (if bipolar) + live value readout
+    // Wraps a range input with: zero-tick (if bipolar) + clickable/editable value readout
     private wrapSlider(input: HTMLInputElement): HTMLElement {
         const min = parseFloat(input.min);
         const max = parseFloat(input.max);
+        const step = parseFloat(input.step);
 
         const outer = document.createElement('div');
         outer.className = 'slider-outer';
@@ -740,11 +771,46 @@ export class NodeEditor {
 
         const valEl = document.createElement('span');
         valEl.className = 'slider-val';
+        valEl.tabIndex = 0;
         const fmt = () => this.fmtVal(input.value, input.step);
         valEl.textContent = fmt();
-        input.addEventListener('input', () => { valEl.textContent = fmt(); });
-        outer.appendChild(valEl);
+        input.addEventListener('input', () => { if (valEl.contentEditable !== 'true') valEl.textContent = fmt(); });
 
+        const startEdit = () => {
+            valEl.contentEditable = 'true';
+            valEl.classList.add('editing');
+            valEl.textContent = fmt();
+            const range = document.createRange();
+            range.selectNodeContents(valEl);
+            const sel = window.getSelection();
+            sel?.removeAllRanges();
+            sel?.addRange(range);
+        };
+
+        const commitEdit = () => {
+            valEl.contentEditable = 'false';
+            valEl.classList.remove('editing');
+            const raw = parseFloat(valEl.textContent ?? '');
+            if (!isNaN(raw)) {
+                const precision = step < 1 ? Math.round(-Math.log10(step)) : 0;
+                const rounded = parseFloat(raw.toFixed(precision));
+                // Expand slider bounds to hold the typed value so the browser doesn't clamp it
+                if (rounded < parseFloat(input.min)) input.min = String(rounded);
+                if (rounded > parseFloat(input.max)) input.max = String(rounded);
+                input.value = String(rounded);
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            valEl.textContent = fmt();
+        };
+
+        valEl.addEventListener('click', (e) => { e.stopPropagation(); startEdit(); });
+        valEl.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); valEl.blur(); }
+            if (e.key === 'Escape') { valEl.contentEditable = 'false'; valEl.classList.remove('editing'); valEl.textContent = fmt(); }
+        });
+        valEl.addEventListener('blur', commitEdit);
+
+        outer.appendChild(valEl);
         return outer;
     }
 
@@ -784,6 +850,24 @@ export class NodeEditor {
     }
 
     // --- Connect ---
+    private handlePortClick(id: string, portName: string, isOutput: boolean) {
+        if (this.connecting) {
+            if (this.connecting.isOutput && !isOutput) {
+                this.graph.connect(this.connecting.fromId, id, portName);
+                this.cancelConnect();
+                this.render(); this.onChange();
+            } else if (!this.connecting.isOutput && isOutput) {
+                this.graph.connect(id, this.connecting.fromId, this.connecting.fromPort);
+                this.cancelConnect();
+                this.render(); this.onChange();
+            } else {
+                this.startConnect(id, portName, isOutput);
+            }
+        } else {
+            this.startConnect(id, portName, isOutput);
+        }
+    }
+
     private startConnect(id: string, port: string, isOutput: boolean) {
         // If already connecting from same port, cancel (toggle off)
         if (this.connecting && this.connecting.fromId === id && this.connecting.fromPort === port) {
@@ -793,7 +877,8 @@ export class NodeEditor {
         if (this.connecting) this.cancelConnect();
 
         const tmpLine = document.createElementNS('http://www.w3.org/2000/svg', 'path') as SVGPathElement;
-        tmpLine.classList.add('conn-temp', port === UV_PORT ? 'conn-temp-uv' : 'conn-temp-sig');
+        const isCv = port === CV_PORT || port.startsWith('~');
+        tmpLine.classList.add('conn-temp', port === UV_PORT ? 'conn-temp-uv' : isCv ? 'conn-temp-cv' : 'conn-temp-sig');
         this.svg.appendChild(tmpLine);
         this.connecting = { fromId: id, fromPort: port, isOutput, tmpLine };
         this.container.classList.add('pending-connect');
@@ -866,6 +951,8 @@ export class NodeEditor {
     };
 
     private getPortCenter(nodeId: string, portName: string, isOutput: boolean): { x: number; y: number } {
+        // CV param ports on sliders have both port-dot-in and port-dot-cv classes;
+        // regular ports use port-dot-out / port-dot-in.
         const cls = isOutput ? 'port-dot-out' : 'port-dot-in';
         const el = this.container.querySelector(`.${cls}[data-id="${nodeId}"][data-port="${portName}"]`) as HTMLElement | null;
         if (!el) return { x: 0, y: 0 };
@@ -887,6 +974,7 @@ export class NodeEditor {
             const to = this.getPortCenter(conn.toId, conn.inputName, false);
             if (from.x === 0 && from.y === 0) return;
             const isUv = conn.inputName === UV_PORT || fromPort === UV_PORT;
+            const isCv = fromPort === CV_PORT || conn.inputName.startsWith('~');
 
             // Transparent hit area for easier clicking
             const hit = document.createElementNS('http://www.w3.org/2000/svg', 'path') as SVGPathElement;
@@ -910,7 +998,8 @@ export class NodeEditor {
 
             // Visible line
             const path = document.createElementNS('http://www.w3.org/2000/svg', 'path') as SVGPathElement;
-            path.classList.add('conn-line-visible', isUv ? 'conn-uv-visible' : 'conn-sig-visible');
+            path.classList.add('conn-line-visible',
+                isCv ? 'conn-cv-visible' : isUv ? 'conn-uv-visible' : 'conn-sig-visible');
             path.setAttribute('d', this.bezier(from.x, from.y, to.x, to.y));
             this.svg.appendChild(path);
         });

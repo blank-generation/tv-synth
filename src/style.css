@@ -348,6 +348,23 @@ body {
     text-align: right;
     font-variant-numeric: tabular-nums;
     flex-shrink: 0;
+    cursor: text;
+    border-radius: 2px;
+    outline: none;
+    transition: color 0.1s, background 0.1s;
+}
+
+.slider-val:hover {
+    color: rgba(255, 255, 255, 0.65);
+}
+
+.slider-val.editing {
+    background: rgba(255, 255, 255, 0.08);
+    outline: 1px solid rgba(255, 255, 255, 0.22);
+    color: rgba(255, 255, 255, 0.92);
+    padding: 0 3px;
+    cursor: text;
+    user-select: text;
 }
 
 /* Select */
@@ -647,6 +664,60 @@ body {
 .help-close:hover {
     background: rgba(255, 255, 255, 0.1);
     border-color: rgba(255, 255, 255, 0.3);
+}
+
+/* ── CV (Control Voltage) ports ─────────────────────────────────────────── */
+
+/* Diamond-shaped port dot for CV connections on slider params */
+.port-dot-cv {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    transform: rotate(45deg);
+    background: rgba(232, 180, 0, 0.06);
+    border: 1.5px solid rgba(232, 180, 0, 0.35);
+    flex-shrink: 0;
+    transition: background 0.1s, box-shadow 0.1s, border-color 0.1s;
+}
+
+.port-dot-cv:hover,
+.port-dot-cv.snap-target {
+    background: rgba(232, 180, 0, 0.22);
+    border-color: #e8b400;
+    box-shadow: 0 0 5px rgba(232, 180, 0, 0.5);
+    transform: rotate(45deg) scale(1.25);
+}
+
+.port-dot-cv.connected {
+    background: #e8b400;
+    border-color: #fff;
+    box-shadow: 0 0 6px rgba(232, 180, 0, 0.8);
+}
+
+/* CV wire — gold dashed */
+.conn-cv-visible {
+    fill: none;
+    stroke: rgba(232, 180, 0, 0.7);
+    stroke-width: 1.5;
+    stroke-dasharray: 5 3;
+    pointer-events: none;
+    animation: dash 0.5s linear infinite;
+}
+
+/* Pending CV wire while dragging */
+.conn-temp-cv {
+    fill: none;
+    stroke: rgba(232, 180, 0, 0.9);
+    stroke-width: 1.5;
+    stroke-dasharray: 6 4;
+    pointer-events: none;
+    animation: dash 0.4s linear infinite;
+}
+
+/* Slider dimmed when driven by a CV connection */
+.slider-outer.cv-driven {
+    opacity: 0.35;
+    pointer-events: none;
 }
 
 /* ── Scrollbars ─────────────────────────────────────────────────────────── */

@@ -82,7 +82,7 @@ void main() {
                 shader += `\n    finalColor = out_${conn.fromId};\n`;
             }
         } else {
-            const nonOutput = modules.filter(m => m.type !== 'OUTPUT');
+            const nonOutput = modules.filter(m => m.type !== 'OUTPUT' && m.type !== 'LFO');
             if (nonOutput.length > 0) {
                 shader += `\n    finalColor = out_${nonOutput[nonOutput.length - 1].id};\n`;
             }
@@ -124,6 +124,16 @@ void main() {
         return parseInt(val) || 0;
     }
 
+    // Returns a GLSL float expression: cv_<id> if a CV/LFO connection exists for ~paramName,
+    // otherwise falls back to a static float literal using val/fallback.
+    private static cvOrF(toId: string, paramName: string, graph: ModuleGraph, val: any, fallback = 0): string {
+        const conn = graph.connections.find(c => c.toId === toId && c.inputName === `~${paramName}`);
+        if (!conn) return this.f(val, fallback);
+        const fromMod = graph.modules.get(conn.fromId);
+        if (fromMod?.type !== 'LFO') return this.f(val, fallback); // only LFO drives CV
+        return `cv_${conn.fromId}`;
+    }
+
     // Returns the GLSL vec3 expression for a named input port, or a fallback
     private static inp(toId: string, inputName: string, graph: ModuleGraph, fallback = 'vec3(0.0)'): string {
         const conn = graph.connections.find(c => c.toId === toId && c.inputName === inputName);
@@ -137,7 +147,6 @@ void main() {
     }
 
     // Analog imperfection snippet — grain + slow luma drift on a source output.
-    // When analog == 0 the additions are no-ops (GPU folds the constants).
     private static analogChunk(id: string, analog: string): string {
         return (
             `    out_${id} += (hash21(gl_FragCoord.xy * 0.37 + fract(uTime * 17.13)) - 0.5) * ${analog} * 0.2;\n` +
@@ -147,8 +156,7 @@ void main() {
     }
 
     // Re-evaluates a SOURCE node inline using an explicit UV expression.
-    // Used by BLEND to sample its A/B inputs at a transformed UV coordinate.
-    // Returns GLSL code that declares a new vec3 variable named out_<id><suffix>.
+    // Note: CV connections do not affect params in this path (graph not available).
     private static generateChunkWithUv(mod: ModuleState, uvExpr: string, suffix: string): string {
         const id = mod.id;
         const out = `out_${id}${suffix}`;
@@ -253,7 +261,6 @@ void main() {
 `;
                 break;
             default:
-                // Non-source node (COLOR, BLEND, etc.): use already-computed value unchanged
                 c += `    vec3 ${out} = out_${id};
 `;
         }
@@ -266,16 +273,37 @@ void main() {
 
         switch (mod.type) {
 
+            // ── Animation / CV ─────────────────────────────────────────────────
+
+            case 'LFO': {
+                const rate  = this.f(mod.params.rate, 1);
+                const phase = this.f(mod.params.phase, 0);
+                const minV  = this.f(mod.params.min, 0);
+                const maxV  = this.f(mod.params.max, 1);
+                const wave  = this.i(mod.params.wave);
+                const t = `(uTime * ${rate} + ${phase})`;
+                let waveExpr: string;
+                if      (wave === 1) waveExpr = `step(0.5, fract(${t}))`;
+                else if (wave === 2) waveExpr = `abs(fract(${t}) * 2.0 - 1.0)`;
+                else if (wave === 3) waveExpr = `fract(${t})`;
+                else if (wave === 4) waveExpr = `1.0 - fract(${t})`;
+                else if (wave === 5) waveExpr = `valueNoise(vec2(${t}, 0.5))`;
+                else                 waveExpr = `sin(${t} * TAU) * 0.5 + 0.5`;
+                c += `    float cv_${id} = mix(${minV}, ${maxV}, clamp(${waveExpr}, 0.0, 1.0));\n`;
+                c += `    vec3 out_${id} = vec3(cv_${id});\n`;
+                break;
+            }
+
             // ── Sources ────────────────────────────────────────────────────────
 
             case 'OSC': {
-                const uvE = this.getUv(id, graph);
-                const dir = this.i(mod.params.dir);
-                const freq = this.f(mod.params.freq, 5);
-                const speed = this.f(mod.params.speed, 1);
-                const type = this.i(mod.params.type);
-                const chroma = this.f(mod.params.chromaOffset, 0);
-                const analog = this.f(mod.params.analog, 0);
+                const uvE    = this.getUv(id, graph);
+                const dir    = this.i(mod.params.dir);
+                const freq   = this.cvOrF(id, 'freq',        graph, mod.params.freq,        5);
+                const speed  = this.cvOrF(id, 'speed',       graph, mod.params.speed,       1);
+                const type   = this.i(mod.params.type);
+                const chroma = this.cvOrF(id, 'chromaOffset',graph, mod.params.chromaOffset, 0);
+                const analog = this.cvOrF(id, 'analog',      graph, mod.params.analog,       0);
                 c += `    vec3 out_${id} = vec3(\n`;
                 c += `        getOsc(getRamp(${uvE}, ${dir}) * ${freq} + uTime * ${speed} + ${chroma}, ${type}),\n`;
                 c += `        getOsc(getRamp(${uvE}, ${dir}) * ${freq} + uTime * ${speed},             ${type}),\n`;
@@ -286,22 +314,23 @@ void main() {
             }
 
             case 'NOISE': {
-                const uvE = this.getUv(id, graph);
-                const scale = this.f(mod.params.scale, 4);
-                const speed = this.f(mod.params.speed, 0.5);
-                const analog = this.f(mod.params.analog, 0);
+                const uvE    = this.getUv(id, graph);
+                const scale  = this.cvOrF(id, 'scale', graph, mod.params.scale, 4);
+                const speed  = this.cvOrF(id, 'speed', graph, mod.params.speed, 0.5);
+                const analog = this.cvOrF(id, 'analog',graph, mod.params.analog, 0);
                 c += `    vec3 out_${id} = vec3(valueNoise(${uvE} * ${scale} + uTime * ${speed}));\n`;
                 c += this.analogChunk(id, analog);
                 break;
             }
 
             case 'SHAPE': {
-                const uvE = this.getUv(id, graph);
-                const type = this.i(mod.params.type);
-                const radius = this.f(mod.params.radius, 0.4);
-                const smooth = this.f(Math.max(parseFloat(mod.params.smooth ?? 0.02), 0.001), 0.02);
-                const chroma = this.f(mod.params.chroma, 0);
-                const analog = this.f(mod.params.analog, 0);
+                const uvE    = this.getUv(id, graph);
+                const type   = this.i(mod.params.type);
+                const radius = this.cvOrF(id, 'radius', graph, mod.params.radius, 0.4);
+                const smooth = this.cvOrF(id, 'smooth', graph,
+                    Math.max(parseFloat(mod.params.smooth ?? 0.02), 0.001), 0.02);
+                const chroma = this.cvOrF(id, 'chroma', graph, mod.params.chroma, 0);
+                const analog = this.cvOrF(id, 'analog', graph, mod.params.analog, 0);
                 const dFn = (uv: string) => {
                     if (type === 1) return `max(abs(${uv}.x - 0.5), abs(${uv}.y - 0.5)) * 2.0`;
                     if (type === 2) return `min(abs(${uv}.x - 0.5), abs(${uv}.y - 0.5)) * 2.0`;
@@ -321,13 +350,14 @@ void main() {
             }
 
             case 'HATCH': {
-                const uvE = this.getUv(id, graph);
-                const freq = this.f(mod.params.freq, 10);
-                const thickH = this.f(mod.params.thickH, 0.3);
-                const thickV = this.f(mod.params.thickV, 0.3);
-                const chroma = this.f(mod.params.chroma, 0);
-                const edge = this.f(Math.max(parseFloat(mod.params.edge ?? 0.01), 0.001), 0.01);
-                const analog = this.f(mod.params.analog, 0);
+                const uvE    = this.getUv(id, graph);
+                const freq   = this.cvOrF(id, 'freq',   graph, mod.params.freq,   10);
+                const thickH = this.cvOrF(id, 'thickH', graph, mod.params.thickH, 0.3);
+                const thickV = this.cvOrF(id, 'thickV', graph, mod.params.thickV, 0.3);
+                const chroma = this.cvOrF(id, 'chroma', graph, mod.params.chroma, 0);
+                const edge   = this.cvOrF(id, 'edge',   graph,
+                    Math.max(parseFloat(mod.params.edge ?? 0.01), 0.001), 0.01);
+                const analog = this.cvOrF(id, 'analog', graph, mod.params.analog, 0);
                 const hFn = (s: string) => `smoothstep(${thickH} - ${edge}, ${thickH} + ${edge}, abs(sin(${s} * ${freq} * PI)))`;
                 const vFn = (s: string) => `smoothstep(${thickV} - ${edge}, ${thickV} + ${edge}, abs(sin(${s} * ${freq} * PI)))`;
                 c += `    float hHR_${id} = ${hFn(`(${uvE}.y - ${chroma})`)};\n`;
@@ -344,11 +374,11 @@ void main() {
             // ── Color / mix ────────────────────────────────────────────────────
 
             case 'COLOR': {
-                const src = this.inp(id, 'src', graph);
-                const hue = this.f(mod.params.hue, 0);
-                const saturation = this.f(mod.params.saturation, 1);
-                const brightness = this.f(mod.params.brightness, 1);
-                const contrast = this.f(mod.params.contrast, 1);
+                const src        = this.inp(id, 'src', graph);
+                const hue        = this.cvOrF(id, 'hue',        graph, mod.params.hue,        0);
+                const saturation = this.cvOrF(id, 'saturation', graph, mod.params.saturation,  1);
+                const brightness = this.cvOrF(id, 'brightness', graph, mod.params.brightness,  1);
+                const contrast   = this.cvOrF(id, 'contrast',   graph, mod.params.contrast,    1);
                 c += `    vec3 hsv_${id} = rgb2hsv(${src});\n`;
                 c += `    hsv_${id}.x = fract(hsv_${id}.x + ${hue});\n`;
                 c += `    hsv_${id}.y = clamp(hsv_${id}.y * ${saturation}, 0.0, 1.0);\n`;
@@ -358,8 +388,8 @@ void main() {
             }
 
             case 'BLEND': {
-                const mode = this.i(mod.params.mode);
-                const amount = this.f(mod.params.amount, 0.5);
+                const mode   = this.i(mod.params.mode);
+                const amount = this.cvOrF(id, 'amount', graph, mod.params.amount, 0.5);
                 const fallback = mode === 2 ? 'vec3(1.0)' : 'vec3(0.0)';
 
                 const uvConn = graph.connections.find(c => c.toId === id && c.inputName === 'uv');
@@ -368,8 +398,6 @@ void main() {
                 let b: string;
 
                 if (uvConn) {
-                    // Re-evaluate A and B inline using the transformed UV so they are
-                    // actually sampled in the new coordinate space.
                     const uvExpr = `out_${uvConn.fromId}.xy`;
                     const aConn = graph.connections.find(c => c.toId === id && c.inputName === 'a');
                     const bConn = graph.connections.find(c => c.toId === id && c.inputName === 'b');
@@ -407,20 +435,19 @@ void main() {
             }
 
             case 'FEEDBACK': {
-                const uvE = this.getUv(id, graph);
-                const src = this.inp(id, 'src', graph, 'vec3(0.0)');
-                const decay = this.f(mod.params.decay, 0.8);
+                const uvE  = this.getUv(id, graph);
+                const src  = this.inp(id, 'src', graph, 'vec3(0.0)');
+                const decay = this.cvOrF(id, 'decay', graph, mod.params.decay, 0.8);
                 c += `    vec3 out_${id} = mix(${src}, texture2D(tFeedback, ${uvE}).rgb, ${decay});\n`;
                 break;
             }
 
             // ── UV Transforms ──────────────────────────────────────────────────
-            // All transform outputs are vec3(u, v, 0.0) — connect to any 'uv' input port
 
             case 'ROTATE': {
-                const uvE = this.getUv(id, graph);
-                const angle = this.f(mod.params.angle, 0);
-                const speed = this.f(mod.params.speed, 0);
+                const uvE   = this.getUv(id, graph);
+                const angle = this.cvOrF(id, 'angle', graph, mod.params.angle, 0);
+                const speed = this.cvOrF(id, 'speed', graph, mod.params.speed, 0);
                 c += `    vec2 rUv_${id} = ${uvE} - 0.5;\n`;
                 c += `    float rAng_${id} = ${angle} + uTime * ${speed};\n`;
                 c += `    vec3 out_${id} = vec3(\n`;
@@ -432,24 +459,24 @@ void main() {
 
             case 'SCALE': {
                 const uvE = this.getUv(id, graph);
-                const sx = this.f(mod.params.sx, 1);
-                const sy = this.f(mod.params.sy, 1);
+                const sx  = this.cvOrF(id, 'sx', graph, mod.params.sx, 1);
+                const sy  = this.cvOrF(id, 'sy', graph, mod.params.sy, 1);
                 c += `    vec3 out_${id} = vec3((${uvE} - 0.5) / vec2(${sx}, ${sy}) + 0.5, 0.0);\n`;
                 break;
             }
 
             case 'SCROLL': {
-                const uvE = this.getUv(id, graph);
-                const tx = this.f(mod.params.tx, 0);
-                const ty = this.f(mod.params.ty, 0);
-                const speedX = this.f(mod.params.speedX, 0.1);
-                const speedY = this.f(mod.params.speedY, 0);
+                const uvE    = this.getUv(id, graph);
+                const tx     = this.cvOrF(id, 'tx',     graph, mod.params.tx,     0);
+                const ty     = this.cvOrF(id, 'ty',     graph, mod.params.ty,     0);
+                const speedX = this.cvOrF(id, 'speedX', graph, mod.params.speedX, 0.1);
+                const speedY = this.cvOrF(id, 'speedY', graph, mod.params.speedY, 0);
                 c += `    vec3 out_${id} = vec3(fract(${uvE} + vec2(${tx} + uTime * ${speedX}, ${ty} + uTime * ${speedY})), 0.0);\n`;
                 break;
             }
 
             case 'KALEID': {
-                const uvE = this.getUv(id, graph);
+                const uvE  = this.getUv(id, graph);
                 const sides = Math.max(2, this.i(mod.params.sides) || 4);
                 c += `    vec2 kUv_${id} = ${uvE} - 0.5;\n`;
                 c += `    float kR_${id}   = length(kUv_${id});\n`;
@@ -462,26 +489,24 @@ void main() {
             }
 
             case 'PIXELATE': {
-                const uvE = this.getUv(id, graph);
-                const pixels = this.f(mod.params.pixels, 32);
+                const uvE    = this.getUv(id, graph);
+                const pixels = this.cvOrF(id, 'pixels', graph, mod.params.pixels, 32);
                 c += `    vec3 out_${id} = vec3(floor(${uvE} * ${pixels}) / ${pixels}, 0.0);\n`;
                 break;
             }
 
             case 'WARP': {
-                // src input is the warp field; its RG channels displace the UV
-                const uvE = this.getUv(id, graph);
-                const src = this.inp(id, 'src', graph, 'vec3(0.5)');
-                const amount = this.f(mod.params.amount, 0.2);
+                const uvE    = this.getUv(id, graph);
+                const src    = this.inp(id, 'src', graph, 'vec3(0.5)');
+                const amount = this.cvOrF(id, 'amount', graph, mod.params.amount, 0.2);
                 c += `    vec3 out_${id} = vec3(fract(${uvE} + (${src}.xy - 0.5) * ${amount}), 0.0);\n`;
                 break;
             }
 
             case 'MIRROR': {
                 const uvE = this.getUv(id, graph);
-                const mx = this.f(mod.params.mirrorX ?? 1, 1);
-                const my = this.f(mod.params.mirrorY ?? 0, 0);
-                // mix(original, folded, toggle) — fold = abs(fract(u)*2-1)
+                const mx  = this.f(mod.params.mirrorX ?? 1, 1);
+                const my  = this.f(mod.params.mirrorY ?? 0, 0);
                 c += `    vec2 mUv_${id} = ${uvE};\n`;
                 c += `    mUv_${id}.x = mix(mUv_${id}.x, abs(fract(mUv_${id}.x) * 2.0 - 1.0), ${mx});\n`;
                 c += `    mUv_${id}.y = mix(mUv_${id}.y, abs(fract(mUv_${id}.y) * 2.0 - 1.0), ${my});\n`;
@@ -490,8 +515,7 @@ void main() {
             }
 
             case 'CAMERA': {
-                const uvE = this.getUv(id, graph);
-                // flip=1 mirrors X (typical for selfie/webcam)
+                const uvE  = this.getUv(id, graph);
                 const flip = this.i(mod.params.flip ?? 1);
                 const sample = flip
                     ? `vec2(1.0 - ${uvE}.x, ${uvE}.y)`
@@ -509,50 +533,33 @@ void main() {
             // ── Glitch / Analog ────────────────────────────────────────────────
 
             case 'GLITCH': {
-                // Faithful port of v002 Analog Glitch (https://github.com/v002/v002-Glitch)
-                // tex0 = source image, tex1 = bars signal (we simulate with a smooth LFO)
                 const uvE        = this.getUv(id, graph);
-                const distortion = this.f(mod.params.distortion, 0.5);
-                const barsamount = this.f(mod.params.barsamount, 0.4);
-                const barsRate   = this.f(mod.params.barsRate,  1.5);
-                const hsync      = this.f(mod.params.hsync, 0);
-                const vsync      = this.f(mod.params.vsync, 0);
+                const distortion = this.cvOrF(id, 'distortion', graph, mod.params.distortion, 0.5);
+                const barsamount = this.cvOrF(id, 'barsamount', graph, mod.params.barsamount, 0.4);
+                const barsRate   = this.cvOrF(id, 'barsRate',   graph, mod.params.barsRate,  1.5);
+                const hsync      = this.cvOrF(id, 'hsync',      graph, mod.params.hsync, 0);
+                const vsync      = this.cvOrF(id, 'vsync',      graph, mod.params.vsync, 0);
 
                 const srcConn = graph.connections.find(conn => conn.toId === id && conn.inputName === 'src');
                 if (srcConn) {
                     const srcMod = graph.modules.get(srcConn.fromId);
                     if (srcMod) {
-                        // Use last 8 chars of id (random part) for unique suffixes
                         const rnd    = id.slice(-8);
                         const sfxKa  = `_gka${rnd}`;
                         const sfxKb  = `_gkb${rnd}`;
                         const sfxFin = `_gfn${rnd}`;
 
-                        // ── Step 1: sample source at (y,y) and (1-y, 1-y) to get luma key ──
-                        // This is v002's core technique: sampling the image along its own diagonal
-                        // produces per-scanline values that drive content-aware X displacement.
                         c += this.generateChunkWithUv(srcMod, `vec2(${uvE}.y, ${uvE}.y)`,              sfxKa);
                         c += this.generateChunkWithUv(srcMod, `vec2(1.0 - ${uvE}.y, 1.0 - ${uvE}.y)`, sfxKb);
 
-                        // ── Step 2: simulate bars signal (v002's tex1) ──
-                        // v002 feeds a real video signal as tex1 — we simulate with a smooth LFO
-                        // plus a harmonic to mimic the waveshaping of an analog bars generator.
                         c += `    float gBars_${id} = abs(sin(uTime * ${barsRate})) * 0.85 + abs(sin(uTime * ${barsRate} * 2.7)) * 0.15;\n`;
 
-                        // ── Step 3: v002 luma key formula ──
-                        // key = sample(y,y) + sample(1-y,1-y) - bars
-                        // d = (key.r + key.g + key.b) / 3
                         c += `    vec3  gKey_${id} = out_${srcConn.fromId}${sfxKa} + out_${srcConn.fromId}${sfxKb} - vec3(gBars_${id});\n`;
                         c += `    float gD_${id}   = (gKey_${id}.r + gKey_${id}.g + gKey_${id}.b) / 3.0;\n`;
 
-                        // ── Step 4: apply distortion + sync (v002 formula) ──
-                        // point.x -= d * distortion * 0.1
-                        // texcoord = mod(point + mod(vec2(hsync, vsync), 1.0), 1.0)
                         const finalUv = `mod(vec2(${uvE}.x - gD_${id} * ${distortion} * 0.1, ${uvE}.y) + mod(vec2(${hsync}, ${vsync}), 1.0), 1.0)`;
                         c += this.generateChunkWithUv(srcMod, finalUv, sfxFin);
 
-                        // ── Step 5: mix result with bars-modulated result (v002 output formula) ──
-                        // gl_FragColor = mix(result, bars*result, barsamount)
                         c += `    vec3 gRes_${id} = out_${srcConn.fromId}${sfxFin};\n`;
                         c += `    vec3 out_${id}  = mix(gRes_${id}, vec3(gBars_${id}) * gRes_${id}, ${barsamount});\n`;
                     } else {
@@ -565,11 +572,10 @@ void main() {
             }
 
             case 'COLORIZE': {
-                // Mainbow-style luma→hue colorizer: maps brightness to a position on the color wheel
                 const src        = this.inp(id, 'src', graph);
-                const hueOffset  = this.f(mod.params.hueOffset, 0);
-                const hueRange   = this.f(mod.params.hueRange, 1);
-                const saturation = this.f(mod.params.saturation, 1);
+                const hueOffset  = this.cvOrF(id, 'hueOffset',  graph, mod.params.hueOffset,  0);
+                const hueRange   = this.cvOrF(id, 'hueRange',   graph, mod.params.hueRange,   1);
+                const saturation = this.cvOrF(id, 'saturation', graph, mod.params.saturation, 1);
                 c += `    float cLuma_${id} = dot(${src}, vec3(0.299, 0.587, 0.114));\n`;
                 c += `    float cHue_${id}  = fract(${hueOffset} + cLuma_${id} * ${hueRange});\n`;
                 c += `    vec3  out_${id}   = hsv2rgb(vec3(cHue_${id}, ${saturation}, cLuma_${id}));\n`;

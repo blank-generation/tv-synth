@@ -9,6 +9,8 @@ export type ModuleType =
     | 'ROTATE' | 'SCALE' | 'SCROLL' | 'KALEID' | 'PIXELATE' | 'WARP' | 'MIRROR'
     // Glitch / analog
     | 'GLITCH' | 'COLORIZE'
+    // Animation / CV
+    | 'LFO'
     // Sink
     | 'OUTPUT';
 
